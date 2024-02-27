@@ -1,0 +1,10 @@
+<Project>
+    <PropertyGroup>
+        <LangVersion>default</LangVersion>
+        <Nullable>disable</Nullable>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <DisableTransitiveProjectReferences>true</DisableTransitiveProjectReferences>
+        <NoWarn>CS1591</NoWarn>
+    </PropertyGroup>
+</Project>

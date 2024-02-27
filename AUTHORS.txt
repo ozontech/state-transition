@@ -1,0 +1,10 @@
+# This is the official list of project authors for copyright purposes.
+# This file is distinct from the CONTRIBUTING.md file.
+# See the latter for an explanation.
+# 
+# Names should be added to this file as:
+# Name or Organization <email address>
+
+Authors:
+* Beylkhanov Damir <dbeylkhanov@yandex.ru>
+* OZON Tech

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <RootNamespace>StateTransition</RootNamespace>
+        <TargetFramework>net6.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Optimize>true</Optimize>
+        <PackageId>StateTransition</PackageId>
+        <Product>StateTransition</Product>
+        <Version>0.2.0</Version>
+        <Authors>Damir Beylkhanov</Authors>
+        <Company>Ozon Tech</Company>
+        <Description>StateTransition is a simple, but very handy .NET library for configuring of the state machine.</Description>
+        <RepositoryUrl>https://github.com/ozontech/state-transition</RepositoryUrl>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <None Remove="StateTransition.csproj.DotSettings" />
+    </ItemGroup>
+
+</Project>
