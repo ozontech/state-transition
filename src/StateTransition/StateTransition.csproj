@@ -12,10 +12,16 @@
         <Company>Ozon Tech</Company>
         <Description>StateTransition is a simple, but very handy .NET library for configuring of the state machine.</Description>
         <RepositoryUrl>https://github.com/ozontech/state-transition</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageProjectUrl>https://github.com/ozontech/state-transition</PackageProjectUrl>
     </PropertyGroup>
 
     <ItemGroup>
       <None Remove="StateTransition.csproj.DotSettings" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     </ItemGroup>
 
 </Project>
