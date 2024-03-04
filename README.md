@@ -1,3 +1,7 @@
+![NuGet Version](https://img.shields.io/nuget/v/StateTransition)
+
+
+
 ![](logo.png)
 
 # Overview
