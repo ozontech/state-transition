@@ -98,52 +98,266 @@ Now let's look how to easily start configure your state machine using the below 
 
 ## Sample with simple state machine
 
+To feel the power of the state-transition's engine let's build a more realistic example — an **e-commerce order lifecycle** (created → paid → fulfilled → shipped → delivered, with cancellations and returns). It exercises almost every `StateTransition` feature at once:
+
+- transition **guards** (`Func<TEntity, bool>`),
+- transition **actions** (`ITransitionAction`) and per-transition **entry/exit** actions (`BeforeTransitionTo` / `AfterTransitionTo`),
+- default **entry/exit** actions executed around **any** transition (audit trail),
+- **custom transition options** — a subclass of `BaseTransitionOptions<TArgs>` with its own flags and arguments,
+- a **middleware** pipeline (tracing, transaction scope, retry),
+- **autofire** — automatic transition without an external trigger,
+- firing both **by trigger** and **by state**,
+- **`OnTransitionCompleted`** and **`GetTransitionsGraph()`** (Mermaid).
+
+### Domain
+
 ```csharp
-public enum AbcState
+public enum OrderState
 {
-	A,
-	B,
-	C
+    Placed,             // created
+    PaymentProcessing,  // payment in progress
+    Paid,               // paid
+    InFulfillment,      // confirmed, on the warehouse
+    ReadyToShip,        // ready for shipment
+    Shipped,            // shipped
+    Delivered,          // delivered (finite)
+    Cancelled,          // cancelled (finite)
+    Returned,           // return requested
+    Refunded            // money returned (finite)
 }
 
-public enum AbcTrigger
+public enum OrderTrigger
 {
-	SetB,
-	SetC,
-	Auto
+    StartPayment,
+    PaymentSucceeded,
+    RetryPayment,
+    Confirm,
+    AssignWarehouse,
+    Ship,
+    Deliver,
+    Cancel,
+    RequestReturn,
+    Refund
 }
 
-public class Abc
+public class Order
 {
-	public AbcState State { get; set; }
-}
-
-public class AbcStateMachine : StateMachine<AbcState, AbcTrigger, Abc>
-{
-	public AbcStateMachine(): base(abc => abc.State)
-	{
-		Configure(AbcState.A)
-			.AddTransitionTo(AbcState.B, AbcTrigger.SetB);
-		
-		SetFiniteState(AbcState.B); // either set the state as finite, or just configure this state. you have to choose one!
-	}
-    
-	public async Task Fire(Abc abc, AbcTrigger trigger)
-	{
-		await Fire(new FireByTriggerRequest(trigger, abc, CancellationToken.None));
-	}
+    public OrderState State { get; set; }
+    public long Id { get; init; }
+    public decimal Total { get; init; }
+    public bool PaymentCaptured { get; set; }
+    public bool WarehouseAssigned { get; set; }
 }
 ```
-Now we can use our configured `AbcStateMachine`. Let's fire the transition to the `B` state for `Abc`!
+
+### Custom transition options with arguments
+
 ```csharp
-var abcStateMachine = new AbcStateMachine();
-var abc = new Abc {State = AbcState.A};
-await abcStateMachine.Fire(abc, AbcTrigger.SetB);
+public class OrderTransitionOptions : BaseTransitionOptions<OrderTransitionArgs>
+{
+    public override bool IsAutofire { get; set; }
+    public bool UseTransactionScope { get; set; }
+    public bool IsRetryableOnFailure { get; set; }
+}
+
+public class OrderTransitionArgs
+{
+    public string Reason { get; set; }
+    public long OperatorId { get; set; }
+}
 ```
 
-To check out the power of the `StateTransition` engine, - we recommend you start from our [API](#api) section.  
-You can use our sample [Abc state machine](sample/StateTransition.AbcSample/AbcStateMachine.cs) as a playground for easier and quicker familiarization with the `StateTransition` features.  
-In addition, it will be useful to view our unit tests where we have tried to cover all features logic using our simple sample with `Abc`.
+The generic base class `BaseTransitionOptions<TArgs>` passes custom arguments (`Reason`, `OperatorId`) along with the transition.
+
+### Transition actions
+
+```csharp
+public class CapturePaymentAction : StateMachine<OrderState, OrderTrigger, Order>.ITransitionAction
+{
+    public async Task ExecuteAsync(StateMachine<OrderState, OrderTrigger, Order>.Transition t)
+    {
+        // real gateway call; Entity / Destination / TransitionOptions are available via t
+        t.Entity.PaymentCaptured = true;
+        await Task.CompletedTask;
+    }
+}
+
+public class RefundPaymentAction : StateMachine<OrderState, OrderTrigger, Order>.ITransitionAction { /* ... */ }
+public class ReserveStockAction   : StateMachine<OrderState, OrderTrigger, Order>.ITransitionAction { /* ... */ }
+public class ReleaseStockAction   : StateMachine<OrderState, OrderTrigger, Order>.ITransitionAction { /* ... */ }
+public class AssignWarehouseAction : StateMachine<OrderState, OrderTrigger, Order>.ITransitionAction
+{
+    public Task ExecuteAsync(StateMachine<OrderState, OrderTrigger, Order>.Transition t)
+    {
+        t.Entity.WarehouseAssigned = true;
+        return Task.CompletedTask;
+    }
+}
+public class AuditTrailAction     : StateMachine<OrderState, OrderTrigger, Order>.ITransitionAction { /* ... */ }
+```
+
+### Middleware
+
+```csharp
+public class TracingMiddleware : TransitionMiddlewareHandler
+{
+    public override async Task Handle<TRequest>(TRequest req, BaseTransitionOptions options)
+    {
+        // open a span / Jaeger, propagate trace_id from request.Entity
+        await base.Handle(req, options);
+    }
+}
+
+public class TransactionScopeMiddleware : TransitionMiddlewareHandler
+{
+    public override async Task Handle<TRequest>(TRequest req, BaseTransitionOptions options)
+    {
+        if (options is OrderTransitionOptions { UseTransactionScope: true })
+        {
+            using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+            await base.Handle(req, options);
+            scope.Complete();
+        }
+        else
+        {
+            await base.Handle(req, options);
+        }
+    }
+}
+
+public class RetryOnFailureMiddleware : TransitionMiddlewareHandler
+{
+    public override async Task Handle<TRequest>(TRequest req, BaseTransitionOptions options)
+    {
+        const int attempts = 3;
+        for (var i = 0; i < attempts; i++)
+        {
+            try { await base.Handle(req, options); return; }
+            catch (Exception) when (i < attempts - 1 && options is OrderTransitionOptions { IsRetryableOnFailure: true })
+            {
+                await Task.Delay(100 * (i + 1));
+            }
+        }
+
+        await base.Handle(req, options);
+    }
+}
+```
+
+> **Note.** The order of the middleware matters and is inverted: `UseMiddleware` puts each new handler at the head of the stack, so **the last registered middleware runs first**. In the example below `TransactionScopeMiddleware` is registered last so that it wraps the whole pipeline.
+
+### The state machine itself
+
+```csharp
+public class OrderStateMachine : StateMachine<OrderState, OrderTrigger, Order>
+{
+    public OrderStateMachine() : base(order => order.State)
+    {
+        // default entry/exit — executed BEFORE/AFTER any transition (audit)
+        AddDefaultExitAction(new AuditTrailAction());
+
+        // middleware: order matters — the last one added runs first
+        UseMiddleware(new TracingMiddleware());
+        UseMiddleware(new RetryOnFailureMiddleware());
+        UseMiddleware(new TransactionScopeMiddleware());
+
+        // transition completion -> e.g. log or emit a domain event to external subscribers
+        OnTransitionCompleted(t => Console.WriteLine($"Order {t.Entity.Id}: {t.Source} -> {t.Destination}"));
+
+        // NOTE: each AddTransitionTo<OrderTransitionOptions> below gets its own fresh options
+        // instance, so per-transition flags (IsAutofire, transaction, retry) don't leak to
+        // other transitions. Do NOT use InitDefaultStateTransitionOptions here — it would share
+        // ONE options object across all transitions and IsAutofire would become global.
+
+        // ---- payment ----
+        Configure(OrderState.Placed)
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.PaymentProcessing, OrderTrigger.StartPayment, o => { })
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.Cancelled, OrderTrigger.Cancel, o => { });
+
+        // transition to the same state — the "loop" feature (retry cycle)
+        Configure(OrderState.PaymentProcessing)
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.PaymentProcessing, OrderTrigger.RetryPayment, o => { })
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.Cancelled, OrderTrigger.Cancel, o => { });
+
+        Configure(OrderState.PaymentProcessing)
+            .AddTransitionTo<OrderTransitionOptions>(
+                OrderState.Paid, OrderTrigger.PaymentSucceeded,
+                o => { o.IsRetryableOnFailure = true; o.UseTransactionScope = true; },
+                transitionAction: new CapturePaymentAction());
+
+        // ---- fulfillment ----
+        // before entering InFulfillment we reserve the stock (entry-to a specific destination)
+        Configure(OrderState.Paid)
+            .AddTransitionTo<OrderTransitionOptions>(
+                OrderState.InFulfillment, OrderTrigger.Confirm,
+                o => { },
+                transitionAction: new ReserveStockAction())
+            .AddTransitionTo<OrderTransitionOptions>(
+                OrderState.Cancelled, OrderTrigger.Cancel,
+                o => { },
+                guardExpression: order => !order.WarehouseAssigned)
+            .BeforeTransitionTo(OrderState.InFulfillment, new ReserveStockAction());
+
+        // warehouse assignment happens AUTOMATICALLY (autofire) — no external trigger
+        Configure(OrderState.InFulfillment)
+            .AddTransitionTo<OrderTransitionOptions>(
+                OrderState.ReadyToShip, OrderTrigger.AssignWarehouse,
+                o => o.IsAutofire = true,
+                transitionAction: new AssignWarehouseAction());
+
+        // after reaching Shipped from ReadyToShip we release the stock
+        Configure(OrderState.ReadyToShip)
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.Shipped, OrderTrigger.Ship, o => { })
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.Cancelled, OrderTrigger.Cancel, o => { })
+            .AfterTransitionTo(OrderState.Shipped, new ReleaseStockAction());
+
+        // ---- delivery and return ----
+        Configure(OrderState.Shipped)
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.Delivered, OrderTrigger.Deliver, o => { })
+            .AddTransitionTo<OrderTransitionOptions>(OrderState.Returned, OrderTrigger.RequestReturn, o => { });
+
+        Configure(OrderState.Returned)
+            .AddTransitionTo<OrderTransitionOptions>(
+                OrderState.Refunded, OrderTrigger.Refund,
+                o => o.UseTransactionScope = true,
+                transitionAction: new RefundPaymentAction());
+
+        // terminal states — no transitions out of them
+        SetFiniteState(OrderState.Delivered, OrderState.Cancelled, OrderState.Refunded);
+    }
+}
+```
+
+### Usage
+
+The example demonstrates firing **by trigger**, firing **by state**, and the **autofire** cascade:
+
+> `FireByTriggerRequest` and `FireByStateRequest` are nested types of `StateMachine<...>`, so in code outside the machine class you must address them through the derived type: `OrderStateMachine.FireByTriggerRequest`.
+
+```csharp
+var order = new Order { Id = 42, Total = 1024.50m, State = OrderState.Placed };
+var machine = new OrderStateMachine();
+
+await machine.Fire(new OrderStateMachine.FireByTriggerRequest(OrderTrigger.StartPayment, order, CancellationToken.None));
+await machine.Fire(new OrderStateMachine.FireByTriggerRequest(OrderTrigger.PaymentSucceeded, order, CancellationToken.None));
+await machine.Fire(new OrderStateMachine.FireByTriggerRequest(OrderTrigger.Confirm, order, CancellationToken.None));
+
+// autofire: after Confirm the order automatically moved to ReadyToShip
+Console.WriteLine(order.State); // ReadyToShip
+
+// alternatively — jump straight to the target state by TState:
+await machine.Fire(new OrderStateMachine.FireByStateRequest(OrderState.Shipped, order, CancellationToken.None));
+
+// transition graph in Mermaid notation for documentation purposes
+Console.WriteLine(machine.GetTransitionsGraph());
+```
+
+A few things worth knowing before you go:
+
+- **`SetFiniteState` cannot be combined with `Configure` for the same state** (otherwise `AmbiguousStateConfigurationException` is thrown) — terminal states have no outgoing transitions.
+- **Guards do not throw** when the condition isn't met — the transition simply doesn't fire. This differs from a missing trigger, which throws `TriggerStateResolverNotFoundException`.
+- **Autofire cascades**: a single external call (e.g. `Confirm`) can pull a whole chain of automatic transitions behind it.
+- **`InitDefaultStateTransitionOptions<TOptions>()` shares one options instance across all transitions.** If you need per-transition flags (an `IsAutofire` on only one transition, or a transaction scope on only one), give each transition its own options instance via `AddTransitionTo<TOptions>(..., o => ...)` and **do not** initialize a shared default — otherwise the last configured flags leak to every transition, which breaks the autofire filter.
 
 ## API
 
